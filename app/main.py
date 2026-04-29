@@ -256,15 +256,16 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
 
     # ---- Chat handlers ----------------------------------------------------
 
-    def _on_send(user_msg, hist_pairs, strat, d, m, r, t, k, fk, gen, mx, chat_pairs):
+    def _on_send(user_msg, hist_pairs, strat, d, m, r, t, k, fk, gen, mx, chat_msgs):
         """Append user msg, run pipeline, append assistant msg.
 
-        Uses Gradio's default Chatbot tuple format: [[user, bot], ...].
-        hist_pairs mirrors this for the LLM rewriter.
+        gr.Chatbot defaults to the messages format on modern Gradio: a list of
+        {"role": "user"/"assistant", "content": "..."} dicts. hist_pairs is our
+        parallel (user, assistant) tuple list used by the LLM rewriter.
         """
         user_msg = (user_msg or "").strip()
         if not user_msg:
-            return (chat_pairs or []), hist_pairs, gr.update(), "", "", "_(empty input)_", "_(no chunks)_", None
+            return (chat_msgs or []), hist_pairs, gr.update(), "", "", "_(empty input)_", "_(no chunks)_", None
 
         result = run_query(
             query=user_msg,
@@ -283,7 +284,10 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
 
         assistant_msg = result.answer if result.answer else "_(generation is off in pipeline configuration)_"
 
-        new_chat_pairs = (chat_pairs or []) + [[user_msg, assistant_msg]]
+        new_chat_msgs = (chat_msgs or []) + [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": assistant_msg},
+        ]
         new_pairs = (hist_pairs or []) + [(user_msg, assistant_msg)]
 
         config_line = (
@@ -293,7 +297,7 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
             config_line += f"\n\n_Follow-up rewritten as:_ `{result.rewritten_query}`"
 
         return (
-            new_chat_pairs,
+            new_chat_msgs,
             new_pairs,
             gr.update(value=""),                  # clear input
             _format_timings(result.timings),
