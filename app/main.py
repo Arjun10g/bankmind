@@ -178,30 +178,44 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
     sources_md = COMPLIANCE_SOURCES_MD if module == "compliance" else CREDIT_SOURCES_MD
 
     with gr.Column():
-        gr.Markdown(f"### {module.title()} Q&A: live retrieval over the {module} corpus")
+        gr.Markdown(f"### {module.title()} chat: ask follow-ups, the assistant remembers context")
         gr.Markdown(
-            "Pure retrieval queries (no LLM checkboxes ticked) are **free**. Each "
-            "ticked LLM option below adds 1 LLM API call to the query path."
+            "Each turn runs retrieval over the {0} corpus and an LLM generates the answer. "
+            "Follow-ups are auto-rewritten into standalone queries before retrieval. "
+            "Two LLM calls per follow-up turn (rewrite + generate); ~$0.01 to $0.02 each. "
+            "Toggle 'Generate answer' off in pipeline configuration to make queries free."
+            .format(module)
         )
 
-        with gr.Row():
-            with gr.Column(scale=2):
-                query = gr.Textbox(
-                    label="Query",
-                    lines=2,
-                    placeholder=(
-                        "e.g. What are the residential mortgage underwriting standards in OSFI B-20?"
-                        if module == "compliance"
-                        else "e.g. What are Goldman Sachs' key credit risk factors disclosed in the 10-K?"
-                    ),
-                )
-            with gr.Column(scale=1):
-                run_btn = gr.Button("Run query", variant="primary")
+        chatbot = gr.Chatbot(
+            label=f"{module.title()} conversation",
+            height=420,
+        )
 
-        with gr.Accordion("💡 Sample questions (click to use)", open=True):
+        # Two state objects: the chat history pairs (for the rewriter) and the
+        # last QueryResult (for the chunk + guardrail panels).
+        history_state = gr.State([])               # list[(user, assistant)]
+        last_result_state = gr.State(None)         # QueryResult | None
+
+        with gr.Row():
+            with gr.Column(scale=4):
+                user_input = gr.Textbox(
+                    show_label=False,
+                    placeholder=(
+                        "Ask anything about the compliance corpus, then ask follow-ups..."
+                        if module == "compliance"
+                        else "Ask anything about the credit filings corpus, then ask follow-ups..."
+                    ),
+                    lines=2,
+                )
+            with gr.Column(scale=1, min_width=120):
+                send_btn = gr.Button("Send", variant="primary")
+                clear_btn = gr.Button("New conversation", variant="secondary")
+
+        with gr.Accordion("💡 Sample questions (click to load into the input)", open=True):
             gr.Examples(
                 examples=[[ex] for ex in examples],
-                inputs=[query],
+                inputs=[user_input],
                 label="",
                 examples_per_page=10,
             )
@@ -209,52 +223,101 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
         with gr.Accordion("📚 What's in the corpus?", open=False):
             gr.Markdown(sources_md)
 
-        with gr.Accordion("Pipeline configuration", open=False):
+        with gr.Accordion("⚙️ Pipeline configuration", open=False):
+            gr.Markdown(
+                "Defaults are the production winners from the evaluation (see Performance tabs). "
+                "All settings here apply to the **next** chat turn."
+            )
             with gr.Row():
                 strategy = gr.Radio(strategies, value=default_strategy, label="Chunking strategy")
-                dim = gr.Radio([str(d) for d in DIMS], value="512", label="Embedding dim")
+                dim = gr.Radio([str(d) for d in DIMS], value="1024", label="Embedding dim")
             with gr.Row():
-                method = gr.Dropdown(RETRIEVAL_METHODS, value="hybrid_rrf",
+                method = gr.Dropdown(RETRIEVAL_METHODS, value="bm25",
                                      label="Retrieval method")
-                reranker = gr.Dropdown(RERANKERS, value="none", label="Reranker")
+                reranker = gr.Dropdown(RERANKERS, value="cross_encoder", label="Reranker")
                 transform = gr.Dropdown(TRANSFORMS, value="none", label="Query transform")
             with gr.Row():
-                top_k = gr.Slider(5, 30, value=10, step=1, label="Retrieval top_k")
-                final_k = gr.Slider(3, 15, value=5, step=1, label="Final top_n")
-                generate = gr.Checkbox(value=False, label="Generate answer (LLM call, paid)")
+                top_k = gr.Slider(5, 30, value=20, step=1, label="Retrieval top_k")
+                final_k = gr.Slider(3, 15, value=8, step=1, label="Passages sent to LLM")
+                generate = gr.Checkbox(value=True, label="Generate answer (LLM call, paid)")
+            with gr.Row():
+                max_tokens = gr.Slider(500, 4000, value=2000, step=100,
+                                       label="Max answer tokens")
 
         with gr.Row():
-            timings_md = gr.Markdown(label="Timings", value="")
-            config_md = gr.Markdown(label="Config", value="")
+            timings_md = gr.Markdown(value="")
+            config_md = gr.Markdown(value="")
 
-        answer_md = gr.Markdown(label="Answer", value="_(generation off; toggle 'Generate answer' to enable)_")
+        with gr.Accordion("🛡️ Guardrails (last turn)", open=True):
+            guardrails_md = gr.Markdown(value="_(send a message to see guardrails)_")
 
-        with gr.Accordion("🛡️ Guardrails", open=True):
-            guardrails_md = gr.Markdown(value="_(run a query to see guardrails)_")
+        with gr.Accordion("📄 Retrieved passages (last turn)", open=False):
+            chunks_md = gr.Markdown(value="_(send a message to see retrieved passages)_")
 
-        gr.Markdown("### Top retrieved chunks")
-        chunks_md = gr.Markdown()
+    # ---- Chat handlers ----------------------------------------------------
 
-    def _run(q, strat, d, m, r, t, k, fk, gen):
+    def _on_send(user_msg, hist_pairs, strat, d, m, r, t, k, fk, gen, mx, chat_pairs):
+        """Append user msg, run pipeline, append assistant msg.
+
+        Uses Gradio's default Chatbot tuple format: [[user, bot], ...].
+        hist_pairs mirrors this for the LLM rewriter.
+        """
+        user_msg = (user_msg or "").strip()
+        if not user_msg:
+            return (chat_pairs or []), hist_pairs, gr.update(), "", "", "_(empty input)_", "_(no chunks)_", None
+
         result = run_query(
-            query=q, module=module, chunk_strategy=strat,
-            embedding_dim=int(d), retrieval_method=m, reranker=r,
-            query_transform=t, top_k=int(k), final_k=int(fk),
+            query=user_msg,
+            module=module,
+            chunk_strategy=strat,
+            embedding_dim=int(d),
+            retrieval_method=m,
+            reranker=r,
+            query_transform=t,
+            top_k=int(k),
+            final_k=int(fk),
             generate_answer=bool(gen),
+            chat_history=hist_pairs or [],
+            max_answer_tokens=int(mx),
         )
-        ans = result.answer if result.answer is not None else "_(generation off)_"
+
+        assistant_msg = result.answer if result.answer else "_(generation is off in pipeline configuration)_"
+
+        new_chat_pairs = (chat_pairs or []) + [[user_msg, assistant_msg]]
+        new_pairs = (hist_pairs or []) + [(user_msg, assistant_msg)]
+
+        config_line = (
+            f"`{result.config_summary}`  ·  query_id=`{result.query_id or '—'}`"
+        )
+        if result.rewritten_query and result.rewritten_query != user_msg:
+            config_line += f"\n\n_Follow-up rewritten as:_ `{result.rewritten_query}`"
+
         return (
+            new_chat_pairs,
+            new_pairs,
+            gr.update(value=""),                  # clear input
             _format_timings(result.timings),
-            f"`{result.config_summary}`  ·  query_id=`{result.query_id}`",
-            ans,
+            config_line,
             _format_guardrails(result.guardrail_report),
             _format_chunks(result.chunks),
+            result,
         )
 
-    run_btn.click(
-        _run,
-        inputs=[query, strategy, dim, method, reranker, transform, top_k, final_k, generate],
-        outputs=[timings_md, config_md, answer_md, guardrails_md, chunks_md],
+    def _on_clear():
+        return [], [], None, "", "", "_(send a message to see guardrails)_", "_(send a message to see retrieved passages)_"
+
+    send_inputs = [user_input, history_state,
+                   strategy, dim, method, reranker, transform,
+                   top_k, final_k, generate, max_tokens, chatbot]
+    send_outputs = [chatbot, history_state, user_input,
+                    timings_md, config_md, guardrails_md, chunks_md, last_result_state]
+
+    send_btn.click(_on_send, inputs=send_inputs, outputs=send_outputs)
+    user_input.submit(_on_send, inputs=send_inputs, outputs=send_outputs)
+    clear_btn.click(
+        _on_clear, inputs=[],
+        outputs=[chatbot, history_state, last_result_state,
+                 timings_md, config_md, guardrails_md, chunks_md],
     )
 
 
@@ -306,21 +369,22 @@ def build_app() -> gr.Blocks:
                     """
                     **Architecture:** see the project [`README.md`](README.md) for the full work log and design rationale.
 
-                    **Cost notes:**
-                    - Pure retrieval (`bm25` / `splade` / `dense` / `hybrid_*` with `none` reranker / `none` transform / generate=off) makes **0 LLM calls** and is free.
-                    - Each LLM-using option adds 1 API call:
-                      - `query_transform`: hyde / multi_query / prf / step_back. 1 call to rewrite/expand
-                      - `reranker=rankgpt`: 1 call per query at rerank time
-                      - `generate=on`: 1 call to produce the final answer
-                    - Worst case (HyDE/PRF + RankGPT + generate): 3 calls per query, roughly $0.05 each.
+                    **How chat works:**
+                    - Each turn the latest user message is rewritten into a standalone retrieval query (1 LLM call) using the prior conversation as context. This makes follow-ups like "tell me more about that" actually retrieve the right passages.
+                    - Retrieval runs on the rewritten query (free).
+                    - Optional reranker (cross-encoder is local/free; rankgpt costs an extra LLM call).
+                    - Generation produces the answer using the full chat history plus the retrieved passages (1 LLM call).
+                    - First turn: 1 LLM call (~$0.005). Follow-up turns: 2 LLM calls (~$0.01).
 
                     **Production pipelines (per the evaluation):**
-                    - **Compliance**: chunking=semantic, dim=1024, BM25, RankGPT, step_back  (NDCG@10 = 0.834, R@5 = 0.92)
-                    - **Credit**: chunking=semantic, dim=128 (or any), BM25, RankGPT  (NDCG@10 = 0.691, R@5 = 0.82)
+                    - **Compliance**: chunking=semantic, dim=1024, BM25, cross-encoder reranker  (NDCG@10 ≈ 0.789 with cross-encoder, 0.811 with RankGPT)
+                    - **Credit**: chunking=semantic, dim=128, BM25  (NDCG@10 ≈ 0.688)
+
+                    **Free path**: untick "Generate answer" in Pipeline Configuration. Retrieval, reranking with cross-encoder, and the guardrail panel all run with zero LLM cost.
 
                     **Current limitations:**
-                    - Credit Stage 3 (query transform comparison) was halted to conserve credits. Easy to resume.
-                    - MonoT5 + ColBERT rerankers blocked on a transformers v5 compatibility issue. cross_encoder and rankgpt are the verified rerankers.
+                    - Credit Stage 3 of the retrieval benchmark (query transform comparison) was halted during evaluation to conserve credits. Easy to resume.
+                    - MonoT5 + ColBERT rerankers are blocked on a transformers v5 compatibility issue. cross_encoder and rankgpt are the verified rerankers.
                     """
                 )
     return demo

@@ -5,6 +5,11 @@ function that returns enough material for the UI to display:
   - top-k chunks with source attribution
   - generated answer (if requested)
   - per-stage latencies for the performance breakdown
+
+Also supports multi-turn chat. When `chat_history` is non-empty, the user's
+latest message is rewritten to a standalone retrieval query (an LLM call,
+about 100 tokens) so follow-ups like "tell me more about that" actually find
+relevant passages. Generation then receives the full conversation history.
 """
 from __future__ import annotations
 
@@ -21,15 +26,63 @@ from pipelines.shared.reranker import rerank
 from pipelines.shared.retriever import HybridRetriever, ScoredChunk
 
 
-_GENERATE_PROMPT = """You are a senior {role}. Answer the user's question using ONLY the passages below. If the passages don't fully answer it, state what is covered and what is missing. Cite passages by their bracketed number when stating a fact.
+# === Generation prompt: long-form, structured, citation-driven ==============
 
-Question: {query}
+_SYSTEM_PROMPT = """You are a senior {role} answering questions for a colleague.
 
-Passages:
+Voice and style:
+- Speak in the professional but direct register a senior banker uses with peers.
+- Do NOT begin with throat-clearing phrases ("Great question", "Based on the passages", "I'd be happy to help"). Start with the substantive answer.
+- Multi-paragraph answers are encouraged for any non-trivial question. Use bullet lists for enumerable facts.
+- Cite supporting passages inline using their bracketed number, e.g. "Tier 1 capital must be at least 6% of risk-weighted assets [2]".
+- Quote specific clause text, dollar figures, dates, or section numbers verbatim from the passages whenever possible.
+- If the passages partially answer the question, give what they support, then state explicitly what is NOT covered. Do not bluff.
+
+Conversation behaviour:
+- Treat each turn as part of an ongoing conversation. Refer back to prior turns when natural.
+- If the user's follow-up is ambiguous, ask one short clarifying question, then answer the most likely interpretation.
+- Stay in character as a {role}. Don't break the fourth wall about being an AI."""
+
+
+_USER_TURN_TEMPLATE = """Conversation so far:
+{history}
+
+User's latest question: {query}
+
+Retrieved passages:
 {passages}
 
-Answer (3-5 sentences, no preamble):"""
+Write your answer. Be substantive, cite passages by [n], and structure with bullets/headers if appropriate."""
 
+
+_NO_HISTORY_TEMPLATE = """Question: {query}
+
+Retrieved passages:
+{passages}
+
+Write your answer. Be substantive, cite passages by [n], and structure with bullets/headers if appropriate."""
+
+
+# === Follow-up rewriter prompt ===============================================
+
+_REWRITE_SYSTEM = """You rewrite ambiguous follow-up questions in a chat conversation into standalone, fully-self-contained queries that an information retrieval system can answer without seeing prior turns.
+
+Rules:
+- Resolve every pronoun, reference, and ellipsis ("that", "those", "it", "the second one", "what about credit?") using the conversation history.
+- Inline the topic, entities, and constraints from prior turns.
+- Stay close to the user's original wording where possible. Do not invent details.
+- Output a single declarative search query. No quotes, no preamble, no explanation."""
+
+
+_REWRITE_USER = """Conversation so far:
+{history}
+
+The user's latest message: {query}
+
+Rewrite that latest message into a standalone retrieval query that captures the full intent."""
+
+
+# === Data shapes =============================================================
 
 @dataclass
 class QueryResult:
@@ -40,6 +93,7 @@ class QueryResult:
     config_summary: str
     guardrail_report: Optional[GuardrailReport] = None
     query_id: Optional[str] = None
+    rewritten_query: Optional[str] = None  # populated when chat history is non-empty
 
 
 _RETRIEVER: Optional[HybridRetriever] = None
@@ -52,18 +106,56 @@ def _retriever() -> HybridRetriever:
     return _RETRIEVER
 
 
+def _format_history(history: list[tuple[str, str]], *, max_turns: int = 6) -> str:
+    """Format the chat history as a transcript for the prompt.
+    `history` is a list of (user_message, assistant_message) tuples."""
+    if not history:
+        return "(none)"
+    recent = history[-max_turns:]
+    lines = []
+    for u, a in recent:
+        if u:
+            lines.append(f"USER: {u}")
+        if a:
+            lines.append(f"ASSISTANT: {a}")
+    return "\n".join(lines)
+
+
+def _rewrite_followup(query: str, history: list[tuple[str, str]]) -> str:
+    """Rewrite a possibly-ambiguous follow-up into a standalone query.
+
+    No-op when history is empty. On any LLM error, returns the original query.
+    """
+    if not history:
+        return query
+    try:
+        rewritten = claude_text(
+            _REWRITE_USER.format(history=_format_history(history), query=query),
+            system=_REWRITE_SYSTEM,
+            max_tokens=200,
+            temperature=0.0,
+        )
+        # Defensive: strip surrounding quotes / leading/trailing whitespace
+        rewritten = rewritten.strip().strip('"').strip("'").strip()
+        return rewritten or query
+    except Exception:
+        return query
+
+
 def run_query(
     *,
     query: str,
     module: str,
     chunk_strategy: str,
     embedding_dim: int,
-    retrieval_method: str,        # "dense" | "bm25" | "splade" | "hybrid_rrf" | "hybrid_convex" | "hybrid_hier"
-    reranker: str,                # "none" | "cross_encoder" | "monot5" | "colbert" | "rankgpt"
-    query_transform: str,         # "none" | "hyde" | "multi_query" | "prf" | "step_back"
+    retrieval_method: str,
+    reranker: str,
+    query_transform: str,
     top_k: int = 10,
     final_k: int = 5,
-    generate_answer: bool = False,
+    generate_answer: bool = True,
+    chat_history: Optional[list[tuple[str, str]]] = None,
+    max_answer_tokens: int = 2000,
 ) -> QueryResult:
     if not query.strip():
         return QueryResult(answer=None, chunks=[], timings={}, transformed_queries=[],
@@ -71,19 +163,28 @@ def run_query(
 
     timings: dict[str, float] = {}
     retr = _retriever()
+    history = chat_history or []
 
-    # 1) Query transform
+    # 0) Follow-up rewrite (only when there's prior history). One LLM call.
+    rewritten_query = None
+    retrieval_query = query
+    if history:
+        t0 = time.perf_counter()
+        rewritten_query = _rewrite_followup(query, history)
+        retrieval_query = rewritten_query
+        timings["rewrite_ms"] = (time.perf_counter() - t0) * 1000
+
+    # 1) Optional pre-retrieval transform (HyDE / multi-query / PRF / step-back)
     t0 = time.perf_counter()
     try:
         tr = apply_transform(
-            query_transform, query, module=module,
+            query_transform, retrieval_query, module=module,
             retriever=retr, chunk_strategy=chunk_strategy,
             embedding_dim=embedding_dim,
         )
     except Exception as e:
-        # If the transform fails (e.g. no API key), fall back to passthrough
         from pipelines.shared.query_transformer import TransformResult
-        tr = TransformResult(queries=[query], transform_name="none-fallback",
+        tr = TransformResult(queries=[retrieval_query], transform_name="none-fallback",
                              extras={"error": str(e)})
     timings["transform_ms"] = (time.perf_counter() - t0) * 1000
 
@@ -123,28 +224,35 @@ def run_query(
     t0 = time.perf_counter()
     if reranker != "none":
         try:
-            top = rerank(query, retrieved, name=reranker, top_n=final_k)
+            top = rerank(retrieval_query, retrieved, name=reranker, top_n=final_k)
         except Exception as e:
-            # Reranker model load can fail; fall back to retrieval order
             top = retrieved[:final_k]
             timings["reranker_error"] = str(e)
     else:
         top = retrieved[:final_k]
     timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
 
-    # 4) Optional generate
+    # 4) Generation (now richer + history-aware)
     answer = None
     if generate_answer:
         t0 = time.perf_counter()
         role = "compliance officer" if module == "compliance" else "credit analyst"
         passages = "\n\n".join(
-            f"[{i+1}] (doc: {c.payload.get('doc_id','?')}, section: {c.payload.get('section_title','')})\n{c.content[:1500]}"
+            f"[{i+1}] (doc: {c.payload.get('doc_id','?')}, section: {c.payload.get('section_title','')})\n{c.content[:1800]}"
             for i, c in enumerate(top)
         )
+        if history:
+            user_prompt = _USER_TURN_TEMPLATE.format(
+                history=_format_history(history), query=query, passages=passages,
+            )
+        else:
+            user_prompt = _NO_HISTORY_TEMPLATE.format(query=query, passages=passages)
         try:
             answer = claude_text(
-                _GENERATE_PROMPT.format(role=role, query=query, passages=passages),
-                max_tokens=400,
+                user_prompt,
+                system=_SYSTEM_PROMPT.format(role=role),
+                max_tokens=max_answer_tokens,
+                temperature=0.0,
             )
         except Exception as e:
             answer = f"_(generation failed: {type(e).__name__}: {e})_"
@@ -160,7 +268,8 @@ def run_query(
     config_summary = (
         f"module={module}  strategy={chunk_strategy}  dim={embedding_dim}  "
         f"retrieval={retrieval_method}  reranker={reranker}  transform={query_transform}  "
-        f"top_k={top_k}  final_k={final_k}  generate={generate_answer}"
+        f"top_k={top_k}  final_k={final_k}  generate={generate_answer}  "
+        f"chat_turns={len(history)}"
     )
 
     config_dict = {
@@ -173,9 +282,10 @@ def run_query(
         "top_k": top_k,
         "final_k": final_k,
         "generate_answer": generate_answer,
+        "chat_turns": len(history),
+        "rewritten_query": rewritten_query,
     }
 
-    # 6) Persist to query log (Phase 10 observability)
     qid = log_query(
         query=query,
         config=config_dict,
@@ -194,4 +304,5 @@ def run_query(
         config_summary=config_summary,
         guardrail_report=guardrail_report,
         query_id=qid,
+        rewritten_query=rewritten_query,
     )
