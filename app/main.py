@@ -179,13 +179,6 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
 
     with gr.Column():
         gr.Markdown(f"### {module.title()} chat: ask follow-ups, the assistant remembers context")
-        gr.Markdown(
-            "Each turn runs retrieval over the {0} corpus and an LLM generates the answer. "
-            "Follow-ups are auto-rewritten into standalone queries before retrieval. "
-            "Two LLM calls per follow-up turn (rewrite + generate); ~$0.01 to $0.02 each. "
-            "Toggle 'Generate answer' off in pipeline configuration to make queries free."
-            .format(module)
-        )
 
         chatbot = gr.Chatbot(
             label=f"{module.title()} conversation",
