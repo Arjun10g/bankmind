@@ -1,3 +1,15 @@
+---
+title: BankMind
+emoji: 🏦
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+short_description: Multi-domain RAG: regulatory compliance and credit risk
+---
+
 # BankMind
 
 A production-grade multi-domain RAG platform for financial intelligence, built and benchmarked end-to-end. Two specialised pipelines sit on shared infrastructure: a Compliance Assistant covering OSFI, FINTRAC, Basel III/IV, the Bank Act, GDPR, and Federal Reserve Regulation W; and a Credit Analyst Copilot covering five major banks across SEC EDGAR 10-K, 10-Q, 8-K, 40-F, and 6-K filings.
