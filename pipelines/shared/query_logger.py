@@ -1,17 +1,22 @@
-"""Query logger — append-only JSONL of every query that flows through the system.
+"""Query logger: append-only JSONL of every query that flows through the system.
 
 One line per call to `app.query_pipeline.run_query`. Captures everything
 needed to reproduce a query (config), attribute its cost (timings), debug
 its output (top chunks + answer), and audit its safety (guardrail report).
 
-Output: logs/query_log.jsonl   (gitignored)
+Output: logs/query_log.jsonl  (configurable via BANKMIND_LOG_DIR)
 
-Phase 10 minimum-viable observability per CLAUDE.md.
+Phase 10 minimum-viable observability.
+
+Notes for restricted environments (HF Spaces, locked-down Docker, etc.):
+the log directory is created lazily on first write, not at import time.
+If the configured directory is not writable, falls back to `/tmp/bankmind`.
 """
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import uuid
 from datetime import datetime
@@ -19,8 +24,37 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-LOG_PATH = ROOT / "logs" / "query_log.jsonl"
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_log_path() -> Path:
+    """Pick a writable directory. Order:
+       1. $BANKMIND_LOG_DIR env var
+       2. <repo>/logs
+       3. /tmp/bankmind  (always writable)
+    """
+    candidates = []
+    if env_dir := os.environ.get("BANKMIND_LOG_DIR", "").strip():
+        candidates.append(Path(env_dir))
+    candidates.append(ROOT / "logs")
+    candidates.append(Path(tempfile.gettempdir()) / "bankmind")
+
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            # Probe: can we actually write here?
+            probe = d / ".write_probe"
+            probe.touch()
+            probe.unlink(missing_ok=True)
+            return d / "query_log.jsonl"
+        except (PermissionError, OSError):
+            continue
+    # Should never reach here (tmp is writable on every system),
+    # but if it does fall back silently to a noop path.
+    return Path(tempfile.gettempdir()) / "query_log.jsonl"
+
+
+# Resolved lazily on first write so import never crashes.
+LOG_PATH: Path | None = None
 
 
 _LOCK = threading.Lock()
@@ -36,7 +70,17 @@ def log_query(
     answer: str | None,
     guardrail_report: dict | None,
 ) -> str:
-    """Append a single record. Returns the assigned query_id."""
+    """Append a single record. Returns the assigned query_id.
+
+    Resolves the log path on first call (so import never crashes in
+    restricted environments). If the resolved path is not writable, swallows
+    the error: the function still returns a valid query_id, the record just
+    isn't persisted.
+    """
+    global LOG_PATH
+    if LOG_PATH is None:
+        LOG_PATH = _resolve_log_path()
+
     record = {
         "query_id": str(uuid.uuid4()),
         "timestamp_utc": datetime.utcnow().isoformat() + "Z",
@@ -44,14 +88,19 @@ def log_query(
         "config": config,
         "transformed_queries": transformed_queries,
         "timings": timings,
-        "top_chunks": top_chunks,                   # pre-shaped for storage
+        "top_chunks": top_chunks,
         "answer": answer,
         "guardrail_report": guardrail_report,
     }
     line = json.dumps(record, default=str) + "\n"
-    with _LOCK:
-        with LOG_PATH.open("a") as f:
-            f.write(line)
+    try:
+        with _LOCK:
+            with LOG_PATH.open("a") as f:
+                f.write(line)
+    except (PermissionError, OSError):
+        # Never let logging failures crash a query. The record is lost; the
+        # caller still gets a valid query_id back for in-session correlation.
+        pass
     return record["query_id"]
 
 
@@ -71,7 +120,10 @@ def chunk_for_log(chunk) -> dict:
 
 
 def read_log(*, limit: int = 50) -> list[dict]:
-    """Tail the log — useful for the UI's history view if/when added."""
+    """Tail the log: useful for the UI's history view if/when added."""
+    global LOG_PATH
+    if LOG_PATH is None:
+        LOG_PATH = _resolve_log_path()
     if not LOG_PATH.exists():
         return []
     lines = LOG_PATH.read_text().splitlines()

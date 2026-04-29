@@ -34,6 +34,14 @@ RUN pip install --no-cache-dir --user --upgrade pip && \
 # Copy the rest of the project.
 COPY --chown=user:user . /app
 
+# Pre-create writable directories. WORKDIR was created as root, so child dirs
+# need explicit ownership. Also redirect logs/HF cache to user-owned paths.
+USER root
+RUN mkdir -p /app/logs /home/user/.cache/huggingface && \
+    chown -R user:user /app /home/user/.cache
+USER user
+ENV BANKMIND_LOG_DIR=/app/logs
+
 EXPOSE 7860
 
 # `app.py` at the repo root is the entry point that HF Spaces auto-discovers.
