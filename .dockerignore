@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Project data: large, regenerable, not needed in the image
+data/raw/
+data/processed/
+data/eval/source_passages/
+logs/
+
+# Eval results: keep in image so the dashboard works out of the box.
+# (Comment the next line out if you want a clean slate)
+# evaluation/results/
+
+# Notebooks intermediate state
+notebooks/*.ipynb_checkpoints/
+
+# Local secrets and IDE
+.env
+.env.local
+.git/
+.gitignore
+.claude/
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Docker itself
+Dockerfile
+.dockerignore

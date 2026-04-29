@@ -1,0 +1,67 @@
+[project]
+name = "bankmind"
+version = "0.1.0"
+description = "Multi-domain RAG platform for financial intelligence: compliance + credit"
+requires-python = ">=3.11"
+readme = "README.md"
+
+# Core deps cover ingestion, chunking, embedding, sparse encoding, and Qdrant I/O.
+# Reranker / frontend / eval extras live under [project.optional-dependencies].
+# Vector store: Qdrant (open source). Replaces the original Supabase/pgvector plan.
+dependencies = [
+  # PDF parsing
+  "pdfplumber>=0.11.0",
+  "pymupdf>=1.24.0",
+  "unstructured[pdf]>=0.15.0",
+  # HTTP / downloads
+  "httpx>=0.27.0",
+  "tqdm>=4.66.0",
+  # Data handling
+  "pydantic>=2.7.0",
+  "python-dotenv>=1.0.0",
+  # Tokenization (for chunk size limits)
+  "tiktoken>=0.7.0",
+  # Embeddings: Matryoshka via mxbai-embed-large + MiniLM for boundary detection
+  "sentence-transformers>=3.0.0",
+  # Sparse: SPLADE via transformers; transformers + torch were already pulled in
+  # transitively by `unstructured[pdf]`, but listed explicitly here for clarity
+  "transformers>=4.44.0",
+  "torch>=2.4.0",
+  # Vector DB
+  "qdrant-client>=1.17.0",
+  # Numerics
+  "numpy>=1.26.0",
+  "scikit-learn>=1.4.0",
+  "kneed>=0.8.5",   # Elbow detection for PCA eigenstructure analysis
+]
+
+[project.optional-dependencies]
+# Reserved for later phases — listed for visibility, not installed yet.
+# All embedding/reranker models are open-source; only Anthropic is a paid API.
+llm = [
+  "anthropic>=0.34.0",
+]
+reranking = [
+  "ragatouille>=0.0.8",   # ColBERT
+  # Cross-encoder reranker comes from sentence-transformers (already in core deps).
+  # MonoT5 reranker uses transformers (already in core deps).
+  # RankGPT reranker uses anthropic (in [llm]).
+]
+frontend = [
+  "gradio>=4.40.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "plotly>=5.22.0",
+]
+eval = [
+  "ragas>=0.2.0",
+  "datasets>=2.20.0",
+  "bert-score>=0.3.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pipelines", "evaluation", "app", "backend"]

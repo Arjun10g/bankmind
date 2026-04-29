@@ -1,0 +1,32 @@
+{
+  "compliance": {
+    "n_qa_pairs": 100,
+    "n_track_a": 50,
+    "n_track_b": 50,
+    "n_with_reference_answer": 50,
+    "question_types": {
+      "factual": 25,
+      "interpretive": 25
+    },
+    "difficulties": {
+      "easy": 12,
+      "medium": 26,
+      "hard": 12
+    }
+  },
+  "credit": {
+    "n_qa_pairs": 100,
+    "n_track_a": 50,
+    "n_track_b": 50,
+    "n_with_reference_answer": 50,
+    "question_types": {
+      "factual": 25,
+      "interpretive": 25
+    },
+    "difficulties": {
+      "easy": 19,
+      "medium": 27,
+      "hard": 4
+    }
+  }
+}

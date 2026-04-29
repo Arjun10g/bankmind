@@ -1,0 +1,51 @@
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# uv
+.uv-cache/
+
+# Raw and processed data: large, regenerable, NOT committed
+data/raw/
+data/processed/
+logs/
+
+# Eval QA pairs and source passages: ARE committed (small, cost real $ to regenerate)
+# evaluation/results/ JSONs: ARE committed (dashboard depends on them)
+
+# Notebooks intermediate state
+notebooks/*.ipynb_checkpoints/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Model caches
+.cache/
+models/
+
+# Claude local settings (private, not for teammates)
+.claude/settings.local.json

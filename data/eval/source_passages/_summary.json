@@ -1,0 +1,24 @@
+{
+  "compliance": {
+    "n_passages": 25,
+    "by_doc_type": {
+      "fintrac": 3,
+      "osfi": 8,
+      "fed": 3,
+      "basel": 8,
+      "bank_act": 3
+    },
+    "n_unique_docs": 9
+  },
+  "credit": {
+    "n_passages": 25,
+    "by_doc_type": {
+      "6k": 3,
+      "40f": 6,
+      "10k": 6,
+      "10q": 6,
+      "8k": 4
+    },
+    "n_unique_docs": 12
+  }
+}

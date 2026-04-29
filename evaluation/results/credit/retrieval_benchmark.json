@@ -1,0 +1,25 @@
+{
+  "stage_1": {
+    "results": {
+      "dense":         {"label": "dense",         "ndcg": 0.463, "mrr": 0.396, "recall_at_5": 0.620, "p95_latency_ms": 116},
+      "bm25":          {"label": "bm25",          "ndcg": 0.688, "mrr": 0.635, "recall_at_5": 0.840, "p95_latency_ms":  91},
+      "splade":        {"label": "splade",        "ndcg": 0.396, "mrr": 0.340, "recall_at_5": 0.500, "p95_latency_ms": 127},
+      "hybrid_rrf":    {"label": "hybrid_rrf",    "ndcg": 0.595, "mrr": 0.498, "recall_at_5": 0.800, "p95_latency_ms": 160},
+      "hybrid_convex": {"label": "hybrid_convex", "ndcg": 0.484, "mrr": 0.401, "recall_at_5": 0.620, "p95_latency_ms": 296},
+      "hybrid_hier":   {"label": "hybrid_hier",   "ndcg": 0.451, "mrr": 0.386, "recall_at_5": 0.620, "p95_latency_ms": 241}
+    },
+    "winner": "bm25"
+  },
+  "stage_2": {
+    "results": {
+      "none":          {"label": "none",          "ndcg": 0.688, "mrr": 0.635, "recall_at_5": 0.840, "p95_latency_ms":   92},
+      "cross_encoder": {"label": "cross_encoder", "ndcg": 0.610, "mrr": 0.534, "recall_at_5": 0.780, "p95_latency_ms":  599},
+      "monot5":        {"error": "ValueError: corrupted spiece.model — needs HF cache clear and re-download"},
+      "colbert":       {"error": "ModuleNotFoundError: langchain.retrievers — RAGatouille requires langchain"},
+      "rankgpt":       {"label": "rankgpt",       "ndcg": 0.691, "mrr": 0.638, "recall_at_5": 0.820, "p95_latency_ms": 15719}
+    },
+    "winner": "rankgpt",
+    "fixed_retrieval": "bm25"
+  },
+  "_note": "Stage 3 NOT RUN — benchmark halted to conserve Claude credits. Compliance Stage 3 was completed; PRF/step_back tied at NDCG 0.834 over the baseline 0.811. Credit Stage 3 can be run later with: python scripts/run_retrieval_benchmark.py --modules credit --stages 3"
+}

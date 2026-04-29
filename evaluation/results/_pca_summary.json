@@ -1,0 +1,32 @@
+{
+  "compliance": {
+    "n_embeddings": 14318,
+    "elbow_kneedle": 206,
+    "elbow_kneedle_snapped_to_matryoshka": 256,
+    "elbow_second_derivative": 10,
+    "elbow_95pct_variance": 336,
+    "cumvar_at_dims": {
+      "128": 0.7814,
+      "256": 0.9131,
+      "512": 0.9851,
+      "768": 0.9971,
+      "1024": 1.0
+    },
+    "fit_seconds": 1.0
+  },
+  "credit": {
+    "n_embeddings": 18645,
+    "elbow_kneedle": 176,
+    "elbow_kneedle_snapped_to_matryoshka": 128,
+    "elbow_second_derivative": 2,
+    "elbow_95pct_variance": 316,
+    "cumvar_at_dims": {
+      "128": 0.8186,
+      "256": 0.9261,
+      "512": 0.9858,
+      "768": 0.9972,
+      "1024": 1.0
+    },
+    "fit_seconds": 1.6
+  }
+}
