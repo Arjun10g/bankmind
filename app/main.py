@@ -218,23 +218,26 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
 
         with gr.Accordion("⚙️ Pipeline configuration", open=False):
             gr.Markdown(
-                "Defaults are the production winners from the evaluation (see Performance tabs). "
-                "All settings here apply to the **next** chat turn."
+                "Defaults are tuned for fast responses. Bump max tokens, top_k, or "
+                "enable a reranker for higher accuracy at the cost of latency. "
+                "All settings apply to the **next** chat turn."
             )
             with gr.Row():
                 strategy = gr.Radio(strategies, value=default_strategy, label="Chunking strategy")
-                dim = gr.Radio([str(d) for d in DIMS], value="1024", label="Embedding dim")
+                dim = gr.Radio([str(d) for d in DIMS],
+                               value="512" if module == "credit" else "1024",
+                               label="Embedding dim")
             with gr.Row():
                 method = gr.Dropdown(RETRIEVAL_METHODS, value="bm25",
                                      label="Retrieval method")
-                reranker = gr.Dropdown(RERANKERS, value="cross_encoder", label="Reranker")
+                reranker = gr.Dropdown(RERANKERS, value="none", label="Reranker")
                 transform = gr.Dropdown(TRANSFORMS, value="none", label="Query transform")
             with gr.Row():
-                top_k = gr.Slider(5, 30, value=20, step=1, label="Retrieval top_k")
-                final_k = gr.Slider(3, 15, value=8, step=1, label="Passages sent to LLM")
+                top_k = gr.Slider(5, 30, value=10, step=1, label="Retrieval top_k")
+                final_k = gr.Slider(3, 15, value=5, step=1, label="Passages sent to LLM")
                 generate = gr.Checkbox(value=True, label="Generate answer (LLM call, paid)")
             with gr.Row():
-                max_tokens = gr.Slider(500, 4000, value=2000, step=100,
+                max_tokens = gr.Slider(500, 4000, value=900, step=100,
                                        label="Max answer tokens")
 
         with gr.Row():
