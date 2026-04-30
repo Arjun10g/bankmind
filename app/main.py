@@ -30,7 +30,7 @@ from app.charts import (
     retrieval_stage_2_figure,
     retrieval_stage_3_figure,
 )
-from app.query_pipeline import run_query
+from app.query_pipeline import run_query, run_query_stream
 
 
 COMPLIANCE_STRATEGIES = ["regulatory_boundary", "semantic", "hierarchical"]
@@ -253,55 +253,97 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
     # ---- Chat handlers ----------------------------------------------------
 
     def _on_send(user_msg, hist_pairs, strat, d, m, r, t, k, fk, gen, mx, chat_msgs):
-        """Append user msg, run pipeline, append assistant msg.
+        """Streaming chat handler. Yields progressive Gradio updates as tokens
+        stream in, so the UI never freezes during generation.
 
-        gr.Chatbot defaults to the messages format on modern Gradio: a list of
-        {"role": "user"/"assistant", "content": "..."} dicts. hist_pairs is our
-        parallel (user, assistant) tuple list used by the LLM rewriter.
+        When `gen` is False (Generate answer toggled off), runs sync retrieve
+        only — no LLM call, free.
         """
         user_msg = (user_msg or "").strip()
         if not user_msg:
-            return (chat_msgs or []), hist_pairs, gr.update(), "", "", "_(empty input)_", "_(no chunks)_", None
+            yield (chat_msgs or [], hist_pairs, gr.update(), "", "",
+                   "_(empty input)_", "_(no chunks)_", None)
+            return
 
-        result = run_query(
-            query=user_msg,
-            module=module,
-            chunk_strategy=strat,
-            embedding_dim=int(d),
-            retrieval_method=m,
-            reranker=r,
-            query_transform=t,
-            top_k=int(k),
-            final_k=int(fk),
-            generate_answer=bool(gen),
-            chat_history=hist_pairs or [],
-            max_answer_tokens=int(mx),
-        )
+        # Free path: no generation. Falls back to the non-streaming run_query.
+        if not gen:
+            result = run_query(
+                query=user_msg, module=module, chunk_strategy=strat,
+                embedding_dim=int(d), retrieval_method=m, reranker=r,
+                query_transform=t, top_k=int(k), final_k=int(fk),
+                generate_answer=False, chat_history=hist_pairs or [],
+                max_answer_tokens=int(mx),
+            )
+            assistant_msg = "_(generation is off in pipeline configuration)_"
+            new_chat_msgs = (chat_msgs or []) + [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": assistant_msg},
+            ]
+            new_pairs = (hist_pairs or []) + [(user_msg, assistant_msg)]
+            cfg = f"`{result.config_summary}`  ·  query_id=`{result.query_id or '—'}`"
+            if result.rewritten_query and result.rewritten_query != user_msg:
+                cfg += f"\n\n_Follow-up rewritten as:_ `{result.rewritten_query}`"
+            yield (new_chat_msgs, new_pairs, gr.update(value=""),
+                   _format_timings(result.timings), cfg,
+                   _format_guardrails(result.guardrail_report),
+                   _format_chunks(result.chunks), result)
+            return
 
-        assistant_msg = result.answer if result.answer else "_(generation is off in pipeline configuration)_"
-
+        # Streaming path. Show user message + an empty assistant placeholder
+        # immediately, then progressively fill the assistant message as tokens
+        # arrive.
         new_chat_msgs = (chat_msgs or []) + [
             {"role": "user", "content": user_msg},
-            {"role": "assistant", "content": assistant_msg},
+            {"role": "assistant", "content": "…"},
         ]
-        new_pairs = (hist_pairs or []) + [(user_msg, assistant_msg)]
+        # Initial yield: clear input, lock in the user message, show "thinking".
+        yield (new_chat_msgs, hist_pairs or [], gr.update(value=""),
+               "_…retrieving…_", "", "_(running guardrails after generation)_",
+               "_(loading)_", None)
 
-        config_line = (
-            f"`{result.config_summary}`  ·  query_id=`{result.query_id or '—'}`"
-        )
-        if result.rewritten_query and result.rewritten_query != user_msg:
-            config_line += f"\n\n_Follow-up rewritten as:_ `{result.rewritten_query}`"
-
-        return (
-            new_chat_msgs,
-            new_pairs,
-            gr.update(value=""),                  # clear input
-            _format_timings(result.timings),
-            config_line,
-            _format_guardrails(result.guardrail_report),
-            _format_chunks(result.chunks),
-            result,
-        )
+        last_setup_result = None
+        accumulated = ""
+        for event_type, payload in run_query_stream(
+            query=user_msg, module=module, chunk_strategy=strat,
+            embedding_dim=int(d), retrieval_method=m, reranker=r,
+            query_transform=t, top_k=int(k), final_k=int(fk),
+            chat_history=hist_pairs or [], max_answer_tokens=int(mx),
+        ):
+            if event_type == "setup":
+                last_setup_result = payload
+                cfg = (
+                    f"`{payload.config_summary}`"
+                    + (f"\n\n_Follow-up rewritten as:_ `{payload.rewritten_query}`"
+                       if payload.rewritten_query and payload.rewritten_query != user_msg
+                       else "")
+                )
+                yield (new_chat_msgs, hist_pairs or [], gr.update(),
+                       _format_timings(payload.timings),
+                       cfg,
+                       "_(running guardrails after generation)_",
+                       _format_chunks(payload.chunks),
+                       None)
+            elif event_type == "token":
+                accumulated = payload
+                # Update the LAST assistant message in place
+                new_chat_msgs[-1] = {"role": "assistant", "content": accumulated or "…"}
+                yield (new_chat_msgs, hist_pairs or [], gr.update(),
+                       gr.update(), gr.update(), gr.update(), gr.update(), None)
+            elif event_type == "done":
+                final_result = payload
+                final_answer = final_result.answer or accumulated or "_(no answer)_"
+                new_chat_msgs[-1] = {"role": "assistant", "content": final_answer}
+                new_pairs = (hist_pairs or []) + [(user_msg, final_answer)]
+                cfg = f"`{final_result.config_summary}`  ·  query_id=`{final_result.query_id or '—'}`"
+                if final_result.rewritten_query and final_result.rewritten_query != user_msg:
+                    cfg += f"\n\n_Follow-up rewritten as:_ `{final_result.rewritten_query}`"
+                yield (new_chat_msgs, new_pairs, gr.update(),
+                       _format_timings(final_result.timings),
+                       cfg,
+                       _format_guardrails(final_result.guardrail_report),
+                       _format_chunks(final_result.chunks),
+                       final_result)
+                return
 
     def _on_clear():
         return [], [], None, "", "", "_(send a message to see guardrails)_", "_(send a message to see retrieved passages)_"
@@ -349,11 +391,94 @@ def _build_perf_tab(module: str):
 # Build the app
 # =============================================================================
 
+_BANKY_THEME = gr.themes.Base(
+    primary_hue=gr.themes.colors.amber,
+    secondary_hue=gr.themes.colors.slate,
+    neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace", "monospace"],
+).set(
+    body_background_fill="#0b1220",
+    body_background_fill_dark="#0b1220",
+    body_text_color="#e5e7eb",
+    body_text_color_dark="#e5e7eb",
+    background_fill_primary="#111827",
+    background_fill_primary_dark="#111827",
+    background_fill_secondary="#0f172a",
+    background_fill_secondary_dark="#0f172a",
+    block_background_fill="#0f172a",
+    block_background_fill_dark="#0f172a",
+    block_border_color="#1f2937",
+    block_border_color_dark="#1f2937",
+    block_label_background_fill="#0b1220",
+    block_label_background_fill_dark="#0b1220",
+    block_label_text_color="#fbbf24",
+    block_label_text_color_dark="#fbbf24",
+    border_color_accent="#fbbf24",
+    border_color_accent_dark="#fbbf24",
+    border_color_primary="#1f2937",
+    border_color_primary_dark="#1f2937",
+    button_primary_background_fill="#fbbf24",
+    button_primary_background_fill_dark="#fbbf24",
+    button_primary_background_fill_hover="#f59e0b",
+    button_primary_background_fill_hover_dark="#f59e0b",
+    button_primary_text_color="#0b1220",
+    button_primary_text_color_dark="#0b1220",
+    button_secondary_background_fill="#1f2937",
+    button_secondary_background_fill_dark="#1f2937",
+    button_secondary_text_color="#e5e7eb",
+    button_secondary_text_color_dark="#e5e7eb",
+    input_background_fill="#0b1220",
+    input_background_fill_dark="#0b1220",
+    input_border_color="#1f2937",
+    input_border_color_dark="#1f2937",
+    input_border_color_focus="#fbbf24",
+    input_border_color_focus_dark="#fbbf24",
+    color_accent_soft="#1f2937",
+    color_accent_soft_dark="#1f2937",
+)
+
+
+_BANKY_CSS = """
+.gradio-container { max-width: 1280px !important; }
+h1, h2, h3, h4 { letter-spacing: -0.01em; font-weight: 600; }
+h1 { font-size: 1.75rem !important; }
+.tabitem { padding-top: 0.5rem; }
+
+/* Tighter accordion headers */
+.label-wrap > span { font-weight: 600; letter-spacing: 0.01em; }
+
+/* Markdown body text */
+.prose { line-height: 1.55; }
+.prose code, .prose pre { background: #0b1220 !important; border: 1px solid #1f2937; border-radius: 6px; }
+.prose table { font-size: 0.92em; }
+.prose th { background: #0b1220 !important; color: #fbbf24 !important; font-weight: 600; }
+.prose td { border-color: #1f2937 !important; }
+
+/* Chatbot polish */
+.message.user { background: #1e293b !important; }
+.message.bot, .message.assistant { background: #0f172a !important; border: 1px solid #1f2937; }
+
+/* Subtle gold accent on the title bar */
+#title-banner {
+  border-left: 3px solid #fbbf24;
+  padding-left: 0.85rem;
+  margin: 0.25rem 0 1rem 0;
+}
+#title-banner h1 { margin: 0; font-size: 1.5rem !important; }
+#title-banner .tagline { color: #94a3b8; font-size: 0.95rem; margin-top: 0.15rem; }
+"""
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="BankMind") as demo:
-        gr.Markdown(
-            "# 🏦 BankMind\n"
-            "_Multi-domain RAG for financial intelligence: compliance and credit._"
+        gr.HTML(
+            """
+            <div id="title-banner">
+              <h1>🏦 BankMind</h1>
+              <div class="tagline">Multi-domain RAG for financial intelligence: regulatory compliance and credit risk.</div>
+            </div>
+            """
         )
         with gr.Tabs():
             with gr.Tab("⚖️ Compliance Q&A"):
@@ -392,5 +517,6 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     app = build_app()
+    app.queue(default_concurrency_limit=4, max_size=16)
     app.launch(server_name="127.0.0.1", server_port=7860, show_error=True,
-               theme=gr.themes.Soft())
+               theme=_BANKY_THEME, css=_BANKY_CSS)

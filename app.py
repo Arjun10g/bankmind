@@ -15,14 +15,18 @@ sys.path.insert(0, str(ROOT))
 
 import gradio as gr
 
-from app.main import build_app
+from app.main import _BANKY_CSS, _BANKY_THEME, build_app
 
 
 if __name__ == "__main__":
     demo = build_app()
+    # Explicit queue so streaming events + multiple clients don't block each
+    # other (and tab switches don't freeze when a chat turn is in flight).
+    demo.queue(default_concurrency_limit=4, max_size=16)
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         show_error=True,
-        theme=gr.themes.Soft(),
+        theme=_BANKY_THEME,
+        css=_BANKY_CSS,
     )

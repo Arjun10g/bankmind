@@ -19,7 +19,7 @@ from typing import Optional
 
 from pipelines.shared.fusion import convex_combination, hierarchical, rrf
 from pipelines.shared.guardrails import GuardrailReport, check as run_guardrails
-from pipelines.shared.llm import claude_text
+from pipelines.shared.llm import FAST_MODEL, claude_text, claude_text_stream
 from pipelines.shared.query_logger import chunk_for_log, log_query
 from pipelines.shared.query_transformer import apply_transform
 from pipelines.shared.reranker import rerank
@@ -123,7 +123,9 @@ def _format_history(history: list[tuple[str, str]], *, max_turns: int = 6) -> st
 def _rewrite_followup(query: str, history: list[tuple[str, str]]) -> str:
     """Rewrite a possibly-ambiguous follow-up into a standalone query.
 
-    No-op when history is empty. On any LLM error, returns the original query.
+    Uses the fast/cheap model (Haiku by default) since paraphrasing is a
+    utility task and Sonnet is overkill. No-op when history is empty.
+    On any LLM error, returns the original query.
     """
     if not history:
         return query
@@ -131,10 +133,10 @@ def _rewrite_followup(query: str, history: list[tuple[str, str]]) -> str:
         rewritten = claude_text(
             _REWRITE_USER.format(history=_format_history(history), query=query),
             system=_REWRITE_SYSTEM,
+            model=FAST_MODEL,
             max_tokens=200,
             temperature=0.0,
         )
-        # Defensive: strip surrounding quotes / leading/trailing whitespace
         rewritten = rewritten.strip().strip('"').strip("'").strip()
         return rewritten or query
     except Exception:
@@ -305,3 +307,170 @@ def run_query(
         query_id=qid,
         rewritten_query=rewritten_query,
     )
+
+
+# === Streaming variant for the chat UI ======================================
+# Yields three kinds of events:
+#   ("setup",  QueryResult)    -> retrieval + rerank done, generation starts
+#   ("token",  str)            -> cumulative answer text (after each delta)
+#   ("done",   QueryResult)    -> final guardrail-checked + logged result
+# This lets the UI render the chunks panel and timings as soon as retrieval is
+# done, then stream tokens into the chat, then apply guardrails when generation
+# completes.
+
+def run_query_stream(
+    *,
+    query: str,
+    module: str,
+    chunk_strategy: str,
+    embedding_dim: int,
+    retrieval_method: str,
+    reranker: str,
+    query_transform: str,
+    top_k: int = 10,
+    final_k: int = 5,
+    chat_history: Optional[list[tuple[str, str]]] = None,
+    max_answer_tokens: int = 900,
+):
+    if not query.strip():
+        yield ("done", QueryResult(answer=None, chunks=[], timings={},
+                                   transformed_queries=[], config_summary="(empty query)"))
+        return
+
+    timings: dict[str, float] = {}
+    retr = _retriever()
+    history = chat_history or []
+
+    # 1) Follow-up rewrite (Haiku, fast)
+    rewritten_query = None
+    retrieval_query = query
+    if history:
+        t0 = time.perf_counter()
+        rewritten_query = _rewrite_followup(query, history)
+        retrieval_query = rewritten_query
+        timings["rewrite_ms"] = (time.perf_counter() - t0) * 1000
+
+    # 2) Optional pre-retrieval transform
+    t0 = time.perf_counter()
+    try:
+        tr = apply_transform(
+            query_transform, retrieval_query, module=module,
+            retriever=retr, chunk_strategy=chunk_strategy,
+            embedding_dim=embedding_dim,
+        )
+    except Exception as e:
+        from pipelines.shared.query_transformer import TransformResult
+        tr = TransformResult(queries=[retrieval_query], transform_name="none-fallback",
+                             extras={"error": str(e)})
+    timings["transform_ms"] = (time.perf_counter() - t0) * 1000
+
+    def _retrieve_one(q: str) -> list[ScoredChunk]:
+        if retrieval_method == "dense":
+            return retr.search(query=q, module=module, chunk_strategy=chunk_strategy,
+                               mode="dense", embedding_dim=embedding_dim, top_k=top_k)
+        if retrieval_method in ("bm25", "splade"):
+            return retr.search(query=q, module=module, chunk_strategy=chunk_strategy,
+                               mode="sparse", sparse_name=retrieval_method, top_k=top_k)
+        if retrieval_method == "hybrid_rrf":
+            return retr.search(query=q, module=module, chunk_strategy=chunk_strategy,
+                               mode="hybrid", embedding_dim=embedding_dim, top_k=top_k)
+        if retrieval_method == "hybrid_convex":
+            d, s, _ = retr.search_separate_channels(
+                query=q, module=module, chunk_strategy=chunk_strategy,
+                embedding_dim=embedding_dim, top_k=50,
+            )
+            return convex_combination(d, s, alpha=0.7, top_k=top_k)
+        if retrieval_method == "hybrid_hier":
+            d, s, _ = retr.search_separate_channels(
+                query=q, module=module, chunk_strategy=chunk_strategy,
+                embedding_dim=embedding_dim, top_k=50,
+            )
+            return hierarchical(q, d, s, top_k=top_k)
+        raise ValueError(f"unknown retrieval_method: {retrieval_method}")
+
+    t0 = time.perf_counter()
+    if len(tr.queries) == 1:
+        retrieved = _retrieve_one(tr.queries[0])
+    else:
+        retrieved = rrf([_retrieve_one(q) for q in tr.queries], top_k=top_k)
+    timings["retrieve_ms"] = (time.perf_counter() - t0) * 1000
+
+    t0 = time.perf_counter()
+    if reranker != "none":
+        try:
+            top = rerank(retrieval_query, retrieved, name=reranker, top_n=final_k)
+        except Exception as e:
+            top = retrieved[:final_k]
+            timings["reranker_error"] = str(e)
+    else:
+        top = retrieved[:final_k]
+    timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
+
+    # Setup event: chunks are known, timings up to this point are known.
+    setup_result = QueryResult(
+        answer=None,
+        chunks=top,
+        timings=dict(timings),
+        transformed_queries=tr.queries if query_transform != "none" else [],
+        config_summary=(
+            f"module={module}  strategy={chunk_strategy}  dim={embedding_dim}  "
+            f"retrieval={retrieval_method}  reranker={reranker}  transform={query_transform}  "
+            f"top_k={top_k}  final_k={final_k}  chat_turns={len(history)}"
+        ),
+        rewritten_query=rewritten_query,
+    )
+    yield ("setup", setup_result)
+
+    # Stream generation
+    role = "compliance officer" if module == "compliance" else "credit analyst"
+    passages = "\n\n".join(
+        f"[{i+1}] (doc: {c.payload.get('doc_id','?')}, section: {c.payload.get('section_title','')})\n{c.content[:1800]}"
+        for i, c in enumerate(top)
+    )
+    if history:
+        user_prompt = _USER_TURN_TEMPLATE.format(
+            history=_format_history(history), query=query, passages=passages,
+        )
+    else:
+        user_prompt = _NO_HISTORY_TEMPLATE.format(query=query, passages=passages)
+
+    t0 = time.perf_counter()
+    accumulated = ""
+    for partial in claude_text_stream(
+        user_prompt,
+        system=_SYSTEM_PROMPT.format(role=role),
+        max_tokens=max_answer_tokens,
+        temperature=0.0,
+    ):
+        accumulated = partial
+        yield ("token", accumulated)
+    timings["generate_ms"] = (time.perf_counter() - t0) * 1000
+
+    # Guardrails + log
+    t0 = time.perf_counter()
+    guardrail_report = run_guardrails(module, accumulated, top, query)
+    timings["guardrails_ms"] = (time.perf_counter() - t0) * 1000
+    timings["total_ms"] = sum(v for k, v in timings.items() if k.endswith("_ms"))
+
+    config_dict = {
+        "module": module, "chunk_strategy": chunk_strategy,
+        "embedding_dim": embedding_dim, "retrieval_method": retrieval_method,
+        "reranker": reranker, "query_transform": query_transform,
+        "top_k": top_k, "final_k": final_k, "generate_answer": True,
+        "chat_turns": len(history), "rewritten_query": rewritten_query,
+        "streaming": True,
+    }
+    qid = log_query(
+        query=query, config=config_dict, timings=timings,
+        transformed_queries=tr.queries if query_transform != "none" else [],
+        top_chunks=[chunk_for_log(c) for c in top], answer=accumulated,
+        guardrail_report=guardrail_report.to_dict(),
+    )
+
+    yield ("done", QueryResult(
+        answer=accumulated, chunks=top, timings=timings,
+        transformed_queries=tr.queries if query_transform != "none" else [],
+        config_summary=setup_result.config_summary,
+        guardrail_report=guardrail_report, query_id=qid,
+        rewritten_query=rewritten_query,
+    ))

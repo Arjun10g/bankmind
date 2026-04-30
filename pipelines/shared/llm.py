@@ -29,6 +29,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+# Light, fast model for utility tasks like follow-up rewriting
+FAST_MODEL = os.environ.get("CLAUDE_FAST_MODEL", "claude-haiku-4-5-20251001")
 DEFAULT_MAX_TOKENS = 1024
 
 
@@ -82,6 +84,36 @@ def claude_text(
     )
     parts = [b.text for b in msg.content if getattr(b, "type", None) == "text"]
     return "".join(parts).strip()
+
+
+def claude_text_stream(
+    prompt: str,
+    *,
+    system: str = "",
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float = 0.0,
+):
+    """Generator yielding the response text as it arrives.
+
+    Each yield is the *cumulative* output so far (suitable for piping straight
+    into Gradio's Chatbot streaming). On error, yields a single error message.
+    """
+    try:
+        client = _get_client()
+        accumulated = ""
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system or "You are a helpful assistant.",
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            for delta in stream.text_stream:
+                accumulated += delta
+                yield accumulated
+    except Exception as e:
+        yield f"_(generation failed: {type(e).__name__}: {e})_"
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
