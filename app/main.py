@@ -394,23 +394,21 @@ def _build_perf_tab(module: str) -> list[gr.Plot]:
     return [pca_plot, dim_plot, chunk_plot, stage1_plot, stage2_plot, stage3_plot]
 
 
-def _load_perf_charts_stream(module: str):
-    """Build the 6 figures one at a time, yielding after each so the UI paints
-    them progressively. Cached via lru_cache in charts.py, so the second tab
-    click instantly returns the cached figures (still streamed in 6 yields,
-    but each yield is ~free)."""
-    builders = [
-        pca_figure,
-        dim_sweep_figure,
-        chunking_figure,
-        retrieval_stage_1_figure,
-        retrieval_stage_2_figure,
-        retrieval_stage_3_figure,
-    ]
-    figs: list = [None, None, None, None, None, None]
-    for i, builder in enumerate(builders):
-        figs[i] = builder(module)
-        yield tuple(figs)
+_CHART_BUILDERS = (
+    pca_figure,
+    dim_sweep_figure,
+    chunking_figure,
+    retrieval_stage_1_figure,
+    retrieval_stage_2_figure,
+    retrieval_stage_3_figure,
+)
+
+
+def _load_perf_charts(module: str):
+    """Build all 6 figures and return them as a tuple. Cached via lru_cache in
+    charts.py, so the second tab click is essentially instant. First click
+    takes ~300-600ms total to load the JSONs and construct Plotly figures."""
+    return tuple(builder(module) for builder in _CHART_BUILDERS)
 
 
 # =============================================================================
@@ -512,27 +510,20 @@ def build_app() -> gr.Blocks:
             with gr.Tab("📊 Credit Q&A"):
                 _build_qa_tab("credit", CREDIT_STRATEGIES, "semantic")
 
-            # Performance tabs: charts render only on first click of the tab,
-            # one at a time so the browser paints between figures.
-            # NB: the .select handler must be a generator function itself —
-            # a lambda returning a generator confuses Gradio's iteration.
+            # Performance tabs: charts render only on first click of the tab.
+            # All 6 figures load + paint together (about 300-600ms first time,
+            # ~instant after thanks to lru_cache in charts.py).
             with gr.Tab("📈 Compliance Performance") as compliance_perf_tab:
                 compliance_perf_plots = _build_perf_tab("compliance")
             with gr.Tab("📉 Credit Performance") as credit_perf_tab:
                 credit_perf_plots = _build_perf_tab("credit")
 
-            def _stream_compliance_charts():
-                yield from _load_perf_charts_stream("compliance")
-
-            def _stream_credit_charts():
-                yield from _load_perf_charts_stream("credit")
-
             compliance_perf_tab.select(
-                _stream_compliance_charts,
+                lambda: _load_perf_charts("compliance"),
                 inputs=[], outputs=compliance_perf_plots,
             )
             credit_perf_tab.select(
-                _stream_credit_charts,
+                lambda: _load_perf_charts("credit"),
                 inputs=[], outputs=credit_perf_plots,
             )
             with gr.Tab("ℹ️ About"):
