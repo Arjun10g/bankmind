@@ -514,17 +514,25 @@ def build_app() -> gr.Blocks:
 
             # Performance tabs: charts render only on first click of the tab,
             # one at a time so the browser paints between figures.
+            # NB: the .select handler must be a generator function itself —
+            # a lambda returning a generator confuses Gradio's iteration.
             with gr.Tab("📈 Compliance Performance") as compliance_perf_tab:
                 compliance_perf_plots = _build_perf_tab("compliance")
-            compliance_perf_tab.select(
-                lambda: _load_perf_charts_stream("compliance"),
-                inputs=[], outputs=compliance_perf_plots,
-            )
-
             with gr.Tab("📉 Credit Performance") as credit_perf_tab:
                 credit_perf_plots = _build_perf_tab("credit")
+
+            def _stream_compliance_charts():
+                yield from _load_perf_charts_stream("compliance")
+
+            def _stream_credit_charts():
+                yield from _load_perf_charts_stream("credit")
+
+            compliance_perf_tab.select(
+                _stream_compliance_charts,
+                inputs=[], outputs=compliance_perf_plots,
+            )
             credit_perf_tab.select(
-                lambda: _load_perf_charts_stream("credit"),
+                _stream_credit_charts,
                 inputs=[], outputs=credit_perf_plots,
             )
             with gr.Tab("ℹ️ About"):
