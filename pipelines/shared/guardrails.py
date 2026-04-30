@@ -282,10 +282,11 @@ def check_compliance(
             ))
 
     if conf_label == "low":
+        top_score_str = f"{chunks[0].score:.3f}" if chunks else "no results"
         warnings.append(GuardrailWarning(
             severity="warning",
             code="low_retrieval_confidence",
-            message=f"Top retrieval score = {chunks[0].score:.3f} if chunks else 'no results'. Answer quality may be unreliable.",
+            message=f"Top retrieval score = {top_score_str}. Answer quality may be unreliable.",
         ))
 
     warnings.extend(_version_warnings(chunks))
@@ -348,10 +349,11 @@ def check_credit(
             ))
 
     if conf_label == "low":
+        top_score_str = f"{chunks[0].score:.3f}" if chunks else "no results"
         warnings.append(GuardrailWarning(
             severity="warning",
             code="low_retrieval_confidence",
-            message=f"Top retrieval score = {chunks[0].score:.3f if chunks else 0:.3f}. Answer quality may be unreliable.",
+            message=f"Top retrieval score = {top_score_str}. Answer quality may be unreliable.",
         ))
 
     warnings.extend(_version_warnings(chunks))

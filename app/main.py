@@ -364,27 +364,53 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
 
 
 # =============================================================================
-# Performance tab builder
+# Performance tab builder (lazy-rendered charts)
 # =============================================================================
 
-def _build_perf_tab(module: str):
+def _build_perf_tab(module: str) -> list[gr.Plot]:
+    """Build the performance tab with empty Plot placeholders.
+
+    Returns the list of plots so the caller can wire the parent gr.Tab's
+    .select event to populate them on first click. Charts are NOT computed
+    at app startup, which keeps initial render fast and avoids shipping all
+    12 figures to the browser eagerly.
+    """
     with gr.Column():
         gr.Markdown(f"### {module.title()} performance: pre-computed evaluation results")
+        gr.Markdown(
+            "_Charts load when this tab is first opened._",
+            elem_classes=["lazy-load-hint"],
+        )
 
-        with gr.Row():
-            gr.Plot(value=pca_figure(module))
-        with gr.Row():
-            gr.Plot(value=dim_sweep_figure(module))
-        with gr.Row():
-            gr.Plot(value=chunking_figure(module))
+        pca_plot = gr.Plot(label="PCA Eigenstructure")
+        dim_plot = gr.Plot(label="Dimension Sweep")
+        chunk_plot = gr.Plot(label="Chunking Benchmark")
 
         gr.Markdown("### Retrieval method ablation (3-stage)")
-        with gr.Row():
-            gr.Plot(value=retrieval_stage_1_figure(module))
-        with gr.Row():
-            gr.Plot(value=retrieval_stage_2_figure(module))
-        with gr.Row():
-            gr.Plot(value=retrieval_stage_3_figure(module))
+        stage1_plot = gr.Plot(label="Stage 1: Retrieval method")
+        stage2_plot = gr.Plot(label="Stage 2: Reranker")
+        stage3_plot = gr.Plot(label="Stage 3: Query transform")
+
+    return [pca_plot, dim_plot, chunk_plot, stage1_plot, stage2_plot, stage3_plot]
+
+
+def _load_perf_charts_stream(module: str):
+    """Build the 6 figures one at a time, yielding after each so the UI paints
+    them progressively. Cached via lru_cache in charts.py, so the second tab
+    click instantly returns the cached figures (still streamed in 6 yields,
+    but each yield is ~free)."""
+    builders = [
+        pca_figure,
+        dim_sweep_figure,
+        chunking_figure,
+        retrieval_stage_1_figure,
+        retrieval_stage_2_figure,
+        retrieval_stage_3_figure,
+    ]
+    figs: list = [None, None, None, None, None, None]
+    for i, builder in enumerate(builders):
+        figs[i] = builder(module)
+        yield tuple(figs)
 
 
 # =============================================================================
@@ -485,10 +511,22 @@ def build_app() -> gr.Blocks:
                 _build_qa_tab("compliance", COMPLIANCE_STRATEGIES, "semantic")
             with gr.Tab("📊 Credit Q&A"):
                 _build_qa_tab("credit", CREDIT_STRATEGIES, "semantic")
-            with gr.Tab("📈 Compliance Performance"):
-                _build_perf_tab("compliance")
-            with gr.Tab("📉 Credit Performance"):
-                _build_perf_tab("credit")
+
+            # Performance tabs: charts render only on first click of the tab,
+            # one at a time so the browser paints between figures.
+            with gr.Tab("📈 Compliance Performance") as compliance_perf_tab:
+                compliance_perf_plots = _build_perf_tab("compliance")
+            compliance_perf_tab.select(
+                lambda: _load_perf_charts_stream("compliance"),
+                inputs=[], outputs=compliance_perf_plots,
+            )
+
+            with gr.Tab("📉 Credit Performance") as credit_perf_tab:
+                credit_perf_plots = _build_perf_tab("credit")
+            credit_perf_tab.select(
+                lambda: _load_perf_charts_stream("credit"),
+                inputs=[], outputs=credit_perf_plots,
+            )
             with gr.Tab("ℹ️ About"):
                 gr.Markdown(
                     """

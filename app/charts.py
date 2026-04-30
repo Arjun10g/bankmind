@@ -2,16 +2,26 @@
 
 Reads pre-computed JSON outputs from `evaluation/results/{module}/...` and
 returns Plotly figures Gradio can render via `gr.Plot`.
+
+Figures are cached in-process: the first call builds the figure, subsequent
+calls hit the cache. This keeps tab switches cheap (no JSON parse, no
+Plotly recompute) and reduces both server-side memory churn and the size of
+the data shipped to the browser on the second render.
 """
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import plotly.graph_objects as go
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "evaluation" / "results"
+
+# Cap PCA traces to the first N components. Anything beyond ~250 is a flat
+# tail that adds visual noise and rendering cost without changing the story.
+PCA_TRACE_CAP = 250
 
 
 def _safe_load(path: Path) -> dict | None:
@@ -25,6 +35,7 @@ def _safe_load(path: Path) -> dict | None:
 
 # === Dimension sweep =======================================================
 
+@lru_cache(maxsize=4)
 def dim_sweep_figure(module: str) -> go.Figure:
     data = _safe_load(RESULTS / module / "dimension_sweep.json")
     fig = go.Figure()
@@ -59,6 +70,7 @@ def dim_sweep_figure(module: str) -> go.Figure:
 
 # === Chunking benchmark ====================================================
 
+@lru_cache(maxsize=4)
 def chunking_figure(module: str) -> go.Figure:
     data = _safe_load(RESULTS / module / "chunking_benchmark.json")
     fig = go.Figure()
@@ -83,6 +95,7 @@ def chunking_figure(module: str) -> go.Figure:
 
 # === Retrieval benchmark per stage =========================================
 
+@lru_cache(maxsize=12)
 def _stage_figure(module: str, stage_key: str, title: str) -> go.Figure:
     data = _safe_load(RESULTS / module / "retrieval_benchmark.json")
     fig = go.Figure()
@@ -127,6 +140,7 @@ def retrieval_stage_3_figure(module: str) -> go.Figure:
 
 # === PCA eigenstructure ===================================================
 
+@lru_cache(maxsize=4)
 def pca_figure(module: str) -> go.Figure:
     data = _safe_load(RESULTS / module / "pca_eigenstructure.json")
     fig = go.Figure()
@@ -134,13 +148,20 @@ def pca_figure(module: str) -> go.Figure:
         fig.add_annotation(text=f"No pca_eigenstructure.json for {module}",
                            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         return fig
-    cum = data.get("cumulative_variance", [])
-    eig = data.get("eigenvalues", [])
-    dims = list(range(1, len(cum) + 1))
+    # Trim to PCA_TRACE_CAP components: the tail beyond ~250 is flat at 1.0
+    # (cumvar) or near 0 (eigenvalues). Keeping only the meaningful range
+    # cuts the data shipped to the browser by ~75% and makes Plotly render
+    # noticeably faster — important for HF Spaces' modest hardware.
+    cum_full = data.get("cumulative_variance", [])
+    eig_full = data.get("eigenvalues", [])
+    cap = min(PCA_TRACE_CAP, len(cum_full))
+    cum = cum_full[:cap]
+    eig = eig_full[:cap]
+    dims = list(range(1, cap + 1))
 
     fig.add_trace(go.Scatter(x=dims, y=cum, name="Cumulative variance",
                              mode="lines", line=dict(color="#1f77b4", width=2)))
-    fig.add_trace(go.Scatter(x=dims, y=eig[:len(dims)], name="Eigenvalue (λ)",
+    fig.add_trace(go.Scatter(x=dims, y=eig, name="Eigenvalue (λ)",
                              mode="lines", yaxis="y2",
                              line=dict(color="#ff7f0e", width=1)))
 
