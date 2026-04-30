@@ -206,12 +206,15 @@ def _build_qa_tab(module: str, strategies: list[str], default_strategy: str):
                 clear_btn = gr.Button("New conversation", variant="secondary")
 
         with gr.Accordion("💡 Sample questions (click to load into the input)", open=True):
-            gr.Examples(
-                examples=[[ex] for ex in examples],
-                inputs=[user_input],
-                label="",
-                examples_per_page=10,
-            )
+            # Two-column grid of click-to-fill buttons. Replaces gr.Examples
+            # which sometimes silently fails to render on Gradio 6.
+            for i in range(0, len(examples), 2):
+                with gr.Row():
+                    for ex in examples[i:i + 2]:
+                        btn = gr.Button(ex, size="sm", variant="secondary",
+                                        elem_classes=["example-btn"])
+                        # Default-arg capture so each closure binds its own example
+                        btn.click(lambda text=ex: text, inputs=[], outputs=[user_input])
 
         with gr.Accordion("📚 What's in the corpus?", open=False):
             gr.Markdown(sources_md)
@@ -491,6 +494,27 @@ h1 { font-size: 1.75rem !important; }
 }
 #title-banner h1 { margin: 0; font-size: 1.5rem !important; }
 #title-banner .tagline { color: #94a3b8; font-size: 0.95rem; margin-top: 0.15rem; }
+
+/* Example question buttons: small, left-aligned, subtle */
+.example-btn button {
+  text-align: left !important;
+  justify-content: flex-start !important;
+  font-weight: 400 !important;
+  font-size: 0.875rem !important;
+  white-space: normal !important;
+  height: auto !important;
+  min-height: 2.4em;
+  padding: 0.5em 0.85em !important;
+  background: #0b1220 !important;
+  border: 1px solid #1f2937 !important;
+  color: #cbd5e1 !important;
+  transition: border-color 0.15s, background 0.15s;
+}
+.example-btn button:hover {
+  border-color: #fbbf24 !important;
+  background: #111827 !important;
+  color: #f1f5f9 !important;
+}
 """
 
 
